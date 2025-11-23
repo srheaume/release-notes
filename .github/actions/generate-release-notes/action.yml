@@ -1,0 +1,152 @@
+name: "Generate Release Notes"
+description: |
+  Generates Markdown release notes based on Git history and Conventional Commits.
+
+inputs:
+  from_ref:
+    description: "The starting Git reference (exclusive). Set to 'auto' to detect the previous tag."
+    required: false
+    default: "auto"
+
+  to_ref:
+    description: "The ending Git reference (inclusive). Defaults to HEAD."
+    required: false
+    default: "HEAD"
+
+  repo_url:
+    description: "Base URL for clickable links. Defaults to the GitHub repository URL."
+    required: true
+    default: ""
+
+  version_label:
+    description: "Version label for the header (e.g. 'v1.0.0' or 'Unreleased')."
+    required: false
+    default: "Unreleased"
+
+  exclude_authors:
+    description: "Comma-separated list of authors to ignore (e.g. 'dependabot[bot]')"
+    required: false
+    default: ""
+
+  exclude_types:
+    description: "Comma-separated list of commit types to ignore (e.g. 'chore,docs')"
+    required: false
+    default: ""
+
+  exclude_scopes:
+    description: "Comma-separated list of scopes to ignore (e.g. 'internal')"
+    required: false
+    default: ""
+
+  exclude_invalid_commits:
+    description: "Set to 'true' to exclude non-conventional commits."
+    required: false
+    default: "false"
+
+  release_notes_artifact_name:
+    description: "Name of the release notes artifact."
+    required: false
+    default: "release-notes"
+
+runs:
+  using: "composite"
+
+  steps:
+    - name: "Set Git Safe Directory"
+      shell: "bash"
+      run: |
+        # step: Set Git Safe Directory
+
+        git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+    - name: "Determine References"
+      id: "determine_references"
+      shell: "bash"
+      run: |
+        # step: Determine References
+
+        __to_ref="${{ inputs.to_ref }}"
+        __from_ref="${{ inputs.from_ref }}"
+
+        # If 'auto' is selected, attempt to find the most recent tag reachable from the parent of to_ref
+        if [[ "${__from_ref}" == "auto" ]]; then
+            # We use ^ (parent) because if we are currently ON a tag, we want the *previous* one.
+            if __prev_tag=$(git describe --tags --abbrev=0 "${__to_ref}^" 2>/dev/null); then
+                echo "Auto-detected previous release tag: ${__prev_tag}"
+                __from_ref="${__prev_tag}"
+            else
+                echo "Warning: No previous tag found in history. Using first commit as start."
+                # Fallback to the very first commit in the tree
+                __from_ref=$(git rev-list --max-parents=0 HEAD | head -n 1)
+            fi
+        fi
+
+        {
+            echo "from_ref=${__from_ref}"
+            echo "to_ref=${__to_ref}"
+        } >>"${GITHUB_OUTPUT}"
+
+    - name: "Build Release Notes Options"
+      id: "build_release_notes_options"
+      shell: "bash"
+      run: |
+        # step: Build Release Notes Options
+
+        __options=""
+
+        if [[ -n "${{ inputs.repo_url }}" ]]; then
+             __options+=" --repo-url ${{ inputs.repo_url }}"
+        fi
+
+        # Handle Version Label
+        if [[ -n "${{ inputs.version_label }}" ]]; then
+             __options+=" --version ${{ inputs.version_label }}"
+        fi
+
+        # Handle Exclusions
+        if [[ -n "${{ inputs.exclude_authors }}" ]]; then
+             __options+=" --exclude-authors ${{ inputs.exclude_authors }}"
+        fi
+
+        if [[ -n "${{ inputs.exclude_types }}" ]]; then
+             __options+=" --exclude-types ${{ inputs.exclude_types }}"
+        fi
+
+        if [[ -n "${{ inputs.exclude_scopes }}" ]]; then
+             __options+=" --exclude-scopes ${{ inputs.exclude_scopes }}"
+        fi
+
+        # Handle Boolean Flag
+        if [[ "${{ inputs.exclude_invalid_commits }}" == "true" ]]; then
+             __options+=" --exclude-invalid-commits"
+        fi
+
+        {
+            echo "options=${__options}"
+        } >>"${GITHUB_OUTPUT}"
+
+    - name: "Download Release Notes Script"
+      shell: "bash"
+      run: |
+        # step: Download Release Notes Script
+
+        curl -sSL -o "${{ runner.temp }}/release-notes.sh" "https://raw.githubusercontent.com/srheaume/release-notes/refs/tags/v0.1.0-stable/release-notes.sh"
+        chmod +x "${{ runner.temp }}/release-notes.sh"
+
+    - name: "Execute Release Notes Command"
+      shell: "bash"
+      run: |
+        # step: Execute Release Notes Command
+
+        # Construct the Release Notes command to execute
+        __release_notes_cmd="${{ runner.temp }}/release-notes.sh ${{ steps.determine_references.outputs.from_ref }} ${{ steps.determine_references.outputs.to_ref }} ${{ steps.build_release_notes_options.outputs.options }}"
+
+        # Execute the Release Notes command
+        ${__release_notes_cmd} >"RELEASE-NOTES.md"
+
+    - name: "Upload Release Notes"
+      uses: "actions/upload-artifact@v5"
+      with:
+        name: "${{ inputs.release_notes_artifact_name }}"
+        path: "RELEASE-NOTES.md"
+        retention-days: 1

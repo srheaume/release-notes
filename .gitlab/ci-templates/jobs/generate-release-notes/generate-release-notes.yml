@@ -1,0 +1,144 @@
+# Generates Markdown release notes based on Git history and Conventional Commits.
+
+spec:
+  inputs:
+    from_ref:
+      description: "The starting Git reference (exclusive). Set to 'auto' to detect the previous tag."
+      type: string
+      default: "auto"
+
+    to_ref:
+      description: "The ending Git reference (inclusive). Defaults to HEAD."
+      type: string
+      default: "HEAD"
+
+    repo_url:
+      description: "Base URL for clickable links. Defaults to the project URL."
+      type: string
+      default: ""
+
+    version_label:
+      description: "Version label for the header (e.g. 'v1.0.0' or 'Unreleased')."
+      type: string
+      default: "Unreleased"
+
+    exclude_authors:
+      description: "Comma-separated list of authors to ignore (e.g. 'dependabot[bot]')"
+      type: string
+      default: ""
+
+    exclude_types:
+      description: "Comma-separated list of commit types to ignore (e.g. 'chore,docs')"
+      type: string
+      default: ""
+
+    exclude_scopes:
+      description: "Comma-separated list of scopes to ignore (e.g. 'internal')"
+      type: string
+      default: ""
+
+    exclude_invalid_commits:
+      description: "Set to 'true' to exclude non-conventional commits."
+      type: boolean
+      default: false
+
+---
+
+.generate-release-notes:
+  image: debian:stable-slim
+
+  before_script:
+    - apt-get update && apt-get install -y curl git
+
+  script:
+    # -------------------------------------------------------------------------
+    # Step 1: Fetch Full Git History
+    # -------------------------------------------------------------------------
+    - |
+      # We need full history to traverse commits and find tags
+      git fetch --all --tags --quiet
+
+    # -------------------------------------------------------------------------
+    # Step 2: Determine 'From' and 'To' References
+    # -------------------------------------------------------------------------
+    - |
+      __to_ref="$[[ inputs.to_ref ]]"
+      __from_ref="$[[ inputs.from_ref ]]"
+
+      # If 'auto' is selected, attempt to find the most recent tag reachable from HEAD
+      if [[ "${__from_ref}" == "auto" ]]; then
+          # Get the latest tag (abbrev=0) reachable from the parent of the current commit (HEAD^)
+          # We use HEAD^ because if we are currently ON a tag, we want the *previous* one.
+          if __prev_tag=$(git describe --tags --abbrev=0 "${__to_ref}^" 2>/dev/null); then
+              echo "Auto-detected previous release tag: ${__prev_tag}"
+              __from_ref="${__prev_tag}"
+          else
+              echo "Warning: No previous tag found in history. Using first commit as start."
+              # Fallback to the very first commit in the tree
+              __from_ref=$(git rev-list --max-parents=0 HEAD | head -n 1)
+          fi
+      fi
+
+    # -------------------------------------------------------------------------
+    # Step 3: Build Command Options
+    # -------------------------------------------------------------------------
+    - |
+      __options=""
+
+      if [[ -n "$[[ inputs.repo_url ]]" ]]; then
+          __options+=" --repo-url $[[ inputs.repo_url ]]"
+      fi
+
+      # Version Label
+      if [[ -n "$[[ inputs.version_label ]]" ]]; then
+          __options+=" --version $[[ inputs.version_label ]]"
+      fi
+
+      # Exclusion Lists
+      if [[ -n "$[[ inputs.exclude_authors ]]" ]]; then
+          __options+=" --exclude-authors $[[ inputs.exclude_authors ]]"
+      fi
+
+      if [[ -n "$[[ inputs.exclude_types ]]" ]]; then
+          __options+=" --exclude-types $[[ inputs.exclude_types ]]"
+      fi
+
+      if [[ -n "$[[ inputs.exclude_scopes ]]" ]]; then
+          __options+=" --exclude-scopes $[[ inputs.exclude_scopes ]]"
+      fi
+
+      # Boolean Flags
+      if [[ "$[[ inputs.exclude_invalid_commits ]]" == "true" ]]; then
+          __options+=" --exclude-invalid-commits"
+      fi
+
+    # -------------------------------------------------------------------------
+    # Step 4: Download Release Notes Script
+    # -------------------------------------------------------------------------
+    - |
+      curl -sSL -o "/tmp/release-notes.sh" "https://raw.githubusercontent.com/srheaume/release-notes/refs/tags/v0.1.0-stable/release-notes.sh"
+      chmod +x "/tmp/release-notes.sh"
+
+    # -------------------------------------------------------------------------
+    # Step 5: Execute Generation
+    # -------------------------------------------------------------------------
+    - |
+      # Construct the Release Notes command to execute
+      __release_notes_cmd="/tmp/release-notes.sh ${__from_ref} ${__to_ref} ${__options}"
+
+      # Execute and save to file
+      ${__release_notes_cmd} >"RELEASE-NOTES.md"
+
+    # -------------------------------------------------------------------------
+    # Step 6: Set Output Variables
+    # -------------------------------------------------------------------------
+    - |
+      # We pass the *location* of the file in the dotenv. 
+      # Passing multi-line markdown directly in dotenv variables is unstable.
+      echo "RELEASE_NOTES_FILE=RELEASE-NOTES.md" >>"release_notes.env"
+
+  artifacts:
+    paths:
+      - RELEASE-NOTES.md
+    reports:
+      dotenv: release_notes.env
